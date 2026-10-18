@@ -339,3 +339,146 @@ print(f"F1-score:  {f1:.4f}")
 
 
 # %%
+# %% [markdown]
+# # Part 3: NB-Weighted Logistic Regression
+
+# %% [markdown]
+# ### 1. Feature Matrix Construction
+# `X[i, j] = count(feature_j in doc_i) * r_j`
+
+# %%
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Keep the Naive Bayes results from Part 2 for the final comparison
+nb_acc, nb_prec, nb_rec, nb_f1 = acc, prec, rec, f1
+
+def build_count_matrix(token_sequences, feature_index_dict):
+    """Raw count matrix of shape (num_documents, vocab_size). OOV features are ignored."""
+    X = np.zeros((len(token_sequences), len(feature_index_dict)))
+    for i, tokens in enumerate(token_sequences):
+        for feature in extract_features(tokens):
+            j = feature_index_dict.get(feature)
+            if j is not None:
+                X[i, j] += 1
+    return X
+
+test_tokens = [tokenize(row["text"]) for row in test_data]
+
+X_train_counts = build_count_matrix(train_tokens, feature_to_index)
+X_test_counts = build_count_matrix(test_tokens, feature_to_index)
+
+# Weight every count by its Naive Bayes log-ratio (broadcast r over rows)
+X_train_nb = X_train_counts * r
+X_test_nb = X_test_counts * r
+
+y_train = np.array([row["label"] for row in train_data])
+y_test = np.array([row["label"] for row in test_data])
+
+print("Train matrix:", X_train_nb.shape, "| Test matrix:", X_test_nb.shape)
+
+# %% [markdown]
+# ### 2. Standardization + Bias column
+# Mean/std come from the **training set only** and are reused for the test set (no leakage).
+
+# %%
+mu = X_train_nb.mean(axis=0)
+sigma = X_train_nb.std(axis=0)
+sigma[sigma == 0] = 1.0   # guard against constant columns
+
+def standardize_with_bias(X):
+    X_std = (X - mu) / sigma
+    return np.hstack([X_std, np.ones((X.shape[0], 1))])   # bias column = last column
+
+X_train = standardize_with_bias(X_train_nb)
+X_test = standardize_with_bias(X_test_nb)
+
+print("Final train matrix:", X_train.shape, "| Final test matrix:", X_test.shape)
+print(f"Standardized train features: mean ~ {X_train[:, :-1].mean():.4f}, std ~ {X_train[:, :-1].std():.4f}")
+
+# %% [markdown]
+# ### 3. Logistic Regression with Gradient Descent (Binary Cross-Entropy)
+
+# %%
+class LogisticRegression:
+    def __init__(self, lr=0.05, epochs=300, l2=0.01, verbose_every=25):
+        self.lr = lr
+        self.epochs = epochs
+        self.l2 = l2                  # L2 penalty on weights (bias excluded); set 0 for plain GD
+        self.verbose_every = verbose_every
+        self.w = None
+        self.loss_history = []
+
+    @staticmethod
+    def sigmoid(z):
+        z = np.clip(z, -500, 500)
+        return 1.0 / (1.0 + np.exp(-z))
+
+    def loss(self, X, y):
+        p = self.sigmoid(X @ self.w)
+        eps = 1e-12
+        bce = -np.mean(y * np.log(p + eps) + (1 - y) * np.log(1 - p + eps))
+        return bce + 0.5 * self.l2 * np.sum(self.w[:-1] ** 2)
+
+    def predict_proba(self, X):
+        return self.sigmoid(X @ self.w)
+
+    def predict(self, X, threshold=0.5):
+        return (self.predict_proba(X) >= threshold).astype(int)
+
+    def fit(self, X, y, X_val=None, y_val=None):
+        n, d = X.shape
+        self.w = np.zeros(d)
+        self.loss_history = []
+        for epoch in range(1, self.epochs + 1):
+            p = self.sigmoid(X @ self.w)
+            grad = X.T @ (p - y) / n
+            grad[:-1] += self.l2 * self.w[:-1]
+            self.w -= self.lr * grad
+
+            current_loss = self.loss(X, y)
+            self.loss_history.append(current_loss)
+
+            if epoch == 1 or epoch % self.verbose_every == 0:
+                train_acc = np.mean(self.predict(X) == y)
+                msg = f"Epoch {epoch:4d}/{self.epochs} | loss: {current_loss:.4f} | train acc: {train_acc:.4f}"
+                if X_val is not None:
+                    msg += f" | test acc: {np.mean(self.predict(X_val) == y_val):.4f}"
+                print(msg)
+        return self
+
+# %%
+lr_model = LogisticRegression(lr=0.05, epochs=300, l2=0.01, verbose_every=25)
+lr_model.fit(X_train, y_train, X_val=X_test, y_val=y_test)
+
+# %%
+plt.figure(figsize=(6, 3.5))
+plt.plot(lr_model.loss_history)
+plt.xlabel("Epoch")
+plt.ylabel("Training loss (BCE + L2)")
+plt.title("Logistic Regression: Gradient Descent")
+plt.grid(alpha=0.3)
+plt.show()
+
+# %% [markdown]
+# ### 4. Evaluation (same metric helpers as Part 2)
+
+# %%
+lr_predictions = lr_model.predict(X_test)
+tp, fp, fn, tn = confusion_counts(lr_predictions, y_test)
+
+lr_acc = accuracy(tp, fp, fn, tn)
+lr_prec = precision(tp, fp)
+lr_rec = recall(tp, fn)
+lr_f1 = f1_score(lr_prec, lr_rec)
+
+print(f"Accuracy:  {lr_acc:.4f}")
+print(f"Precision: {lr_prec:.4f}")
+print(f"Recall:    {lr_rec:.4f}")
+print(f"F1-score:  {lr_f1:.4f}")
+
+# %%
+print(f"{'Model':<28}{'Accuracy':>10}{'F1':>10}")
+print("-" * 48)
+print(f"{'Naive Bayes':<28}{nb_acc:>10.4f}{nb_f1:>10.4f}")
+print(f"{'NB-weighted Logistic Reg.':<28}{lr_acc:>10.4f}{lr_f1:>10.4f}")
