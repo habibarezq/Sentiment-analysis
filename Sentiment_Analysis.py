@@ -21,6 +21,8 @@
 
 # %% [markdown]
 # ## 1. Load a balanced IMDB subset
+#
+# We load the IMDB movie review dataset and select equal numbers of positive and negative reviews for training and testing. This balanced sample keeps the classes evenly represented, making the model comparisons easier to interpret.
 
 # %%
 from datasets import load_dataset
@@ -65,6 +67,8 @@ print(f"Raw review example, Label = {train_data[0]['label']}:\n", train_data[0][
 
 # %% [markdown]
 # ## 2. Pre-processing and tokenization
+#
+# We clean each review by decoding HTML entities, removing markup, converting text to lowercase, and standardizing whitespace and punctuation. Then we split the cleaned text into tokens and add start and end markers so the language model can learn sentence boundaries.
 
 # %%
 START_TOKEN = "<s>"
@@ -90,6 +94,8 @@ print("Tokens example:\n", tokenize(example_raw)[:35])
 
 # %% [markdown]
 # ## 3. Build positive and negative bigram language models
+#
+# We count adjacent token pairs separately in positive and negative training reviews. These bigram models capture how likely one word is to follow another in each sentiment class, while a shared vocabulary handles words consistently.
 
 # %%
 train_tokens = [tokenize(row["text"]) for row in train_data]
@@ -125,6 +131,8 @@ print(f"Negative bigram count: {sum(negative_lm['bigram_counts'].values()):,}")
 
 # %% [markdown]
 # ## 4. Log-likelihood and perplexity
+#
+# We score a review under each sentiment model using add one smoothing, which gives unseen bigrams a nonzero probability. The review is assigned to the model with lower perplexity, meaning that model predicts its token sequence more consistently.
 
 # %%
 import math
@@ -161,8 +169,114 @@ for metric, value in example_result.items():
 
 
 # %% [markdown]
+# ## 5. LM Prediction
+
+# %%
+
+predicted_labels = []
+true_labels = []
+
+for row in test_data:
+    result = compare_lms(row["text"])
+
+    if result["positive_perplexity"] <= result["negative_perplexity"]:
+        prediction = 1
+    else:
+        prediction = 0
+
+    predicted_labels.append(prediction)
+    true_labels.append(row["label"])
+
+correct = sum(
+    p == t for p, t in zip(predicted_labels, true_labels)
+)
+lm_acc = correct / len(true_labels)
+
+TP = sum(p == 1 and t == 1 for p, t in zip(predicted_labels, true_labels))
+FP = sum(p == 1 and t == 0 for p, t in zip(predicted_labels, true_labels))
+FN = sum(p == 0 and t == 1 for p, t in zip(predicted_labels, true_labels))
+TN = sum(p == 0 and t == 0 for p, t in zip(predicted_labels, true_labels))
+
+precision_fun = TP / (TP + FP) if TP + FP > 0 else 0
+recall_fun = TP / (TP + FN) if TP + FN > 0 else 0
+
+lm_f1= (
+    2 * precision_fun * recall_fun / (precision_fun + recall_fun)
+    if precision_fun + recall_fun > 0 else 0
+)
+
+print("LM Classification Results")
+print("-" * 30)
+print(f"Accuracy:  {lm_acc:.4f}")
+print(f"Precision: {precision_fun:.4f}")
+print(f"Recall:    {recall_fun:.4f}")
+print(f"F1-Score:  {lm_f1:.4f}")
+print(f"True Positives:  {TP}")
+print(f"False Positives: {FP}")
+print(f"False Negatives: {FN}")
+print(f"True Negatives:  {TN}")
+
+
+# %% [markdown]
+# ## 6. LM Inference
+
+# %%
+
+
+def generate_text(sentence, lm, max_words=20):
+    # Clean and tokenize the input sentence
+    prefix_words = preprocess_text(sentence).split()
+    context_tokens = map_unk(prefix_words)
+
+    if not context_tokens:
+        context_tokens = [START_TOKEN]
+
+    generated_words = []
+
+    for _ in range(max_words):
+        current_word = context_tokens[-1]
+
+        candidates = word_vocabulary
+
+        next_word = max(
+            candidates,
+            key=lambda word: log_probability(lm, current_word, word)
+        )
+
+        if next_word == END_TOKEN:
+            break
+
+        generated_words.append(next_word)
+        context_tokens.append(next_word)
+
+    return " ".join(prefix_words + generated_words)
+
+sentences = [
+    "the acting was",
+    "i really enjoyed",
+    "the story is",
+    "this film had"
+]
+
+for sentence in sentences:
+    print("\nInput:", sentence)
+
+    print("Positive LM:")
+    print(generate_text(sentence, positive_lm, max_words=10))
+
+    print("Negative LM:")
+    print(generate_text(sentence, negative_lm, max_words=10))
+
+
+# %% [markdown]
+# ## Output Analysis
+# The positive language model frequently generates words such as “great,” while the negative language model tends to generate more generic phrases such as “a movie.” This demonstrates that the two models learn different word-transition patterns from positive and negative reviews.
+#
+# However, the generated sentences are sometimes repetitive and lack grammatical coherence. This is a limitation of the bigram model because it considers only the previous word when predicting the next word, rather than the full sentence context.
+
+# %% [markdown]
 # # Part 2: Naive Bayes
-# 
+#
 
 # %% [markdown]
 # ### 1. Build the Vocabulary 
@@ -189,8 +303,6 @@ def build_vocab(train_tokens,vocab_size=2000):
         feature_index_dict[feature]=i
     return feature_index_dict
 feature_to_index=build_vocab(train_tokens)
-
-
 
 
 # %% [markdown]
@@ -260,7 +372,22 @@ def log_prior_ratio(p1,p2):
     n_p2=len(p2)
     return math.log(n_p1/n_p2)
     
+feature_names = [None] * len(feature_to_index)
+for feature, index in feature_to_index.items():
+    feature_names[index] = feature
+
 r=log_ratios(positive_probs,negative_probs)
+
+sorted_indices = np.argsort(r)
+top_10_negative_indices = sorted_indices[:10]
+top_10_positive_indices = sorted_indices[-10:]
+print("10 Most Negative Features:")
+for i in top_10_negative_indices:
+    print(f"{feature_names[i]}: {r[i]:.4f}")
+
+print("\n10 Most Positive Features:")
+for i in reversed(top_10_positive_indices):
+    print(f"{feature_names[i]}: {r[i]:.4f}")
 
 # %% [markdown]
 # ### 4. Naive Bayes Prediction
@@ -290,10 +417,10 @@ print(f"Predicted: {label}  (score {score:.3f})  ")
 def accuracy(tp, fp, fn, tn):
     return (tp + tn) / (tp + fp + fn + tn)
 
-def precision(tp, fp):
+def precision_fun(tp, fp):
     return tp / (tp + fp) if (tp + fp) > 0 else 0.0
 
-def recall(tp, fn):
+def recall_fun(tp, fn):
     return tp / (tp + fn) if (tp + fn) > 0 else 0.0
 
 def f1_score(prec, rec):
@@ -327,8 +454,8 @@ for row in test_data:
     
 tp, fp, fn, tn = confusion_counts(predictions, true_labels)
 acc=accuracy(tp,fp,fn,tn)
-prec=precision(tp,fp)
-rec=recall(tp,fn)
+prec=precision_fun(tp,fp)
+rec=recall_fun(tp,fn)
 f1=f1_score(prec,rec)
 
 print(f"Accuracy:  {acc:.4f}")
@@ -338,23 +465,19 @@ print(f"F1-score:  {f1:.4f}")
 
 
 
-# %%
 # %% [markdown]
 # # Part 3: NB-Weighted Logistic Regression
 
 # %% [markdown]
 # ### 1. Feature Matrix Construction
-# `X[i, j] = count(feature_j in doc_i) * r_j`
 
 # %%
-import numpy as np
 import matplotlib.pyplot as plt
 
-# Keep the Naive Bayes results from Part 2 for the final comparison
+# Keep the Naive Bayes results
 nb_acc, nb_prec, nb_rec, nb_f1 = acc, prec, rec, f1
 
 def build_count_matrix(token_sequences, feature_index_dict):
-    """Raw count matrix of shape (num_documents, vocab_size). OOV features are ignored."""
     X = np.zeros((len(token_sequences), len(feature_index_dict)))
     for i, tokens in enumerate(token_sequences):
         for feature in extract_features(tokens):
@@ -368,7 +491,7 @@ test_tokens = [tokenize(row["text"]) for row in test_data]
 X_train_counts = build_count_matrix(train_tokens, feature_to_index)
 X_test_counts = build_count_matrix(test_tokens, feature_to_index)
 
-# Weight every count by its Naive Bayes log-ratio (broadcast r over rows)
+# Weight every count by its Naive Bayes log-ratio 
 X_train_nb = X_train_counts * r
 X_test_nb = X_test_counts * r
 
@@ -379,7 +502,6 @@ print("Train matrix:", X_train_nb.shape, "| Test matrix:", X_test_nb.shape)
 
 # %% [markdown]
 # ### 2. Standardization + Bias column
-# Mean/std come from the **training set only** and are reused for the test set (no leakage).
 
 # %%
 mu = X_train_nb.mean(axis=0)
@@ -388,7 +510,7 @@ sigma[sigma == 0] = 1.0   # guard against constant columns
 
 def standardize_with_bias(X):
     X_std = (X - mu) / sigma
-    return np.hstack([X_std, np.ones((X.shape[0], 1))])   # bias column = last column
+    return np.hstack([X_std, np.ones((X.shape[0], 1))])  
 
 X_train = standardize_with_bias(X_train_nb)
 X_test = standardize_with_bias(X_test_nb)
@@ -401,17 +523,14 @@ print(f"Standardized train features: mean ~ {X_train[:, :-1].mean():.4f}, std ~ 
 
 # %%
 class LogisticRegression:
-    def __init__(self, lr=0.05, epochs=300, l2=0.01, verbose_every=25):
+    def __init__(self, lr=0.05, epochs=300, l2=0.01):
         self.lr = lr
         self.epochs = epochs
-        self.l2 = l2                  # L2 penalty on weights (bias excluded); set 0 for plain GD
-        self.verbose_every = verbose_every
+        self.l2 = l2                  
         self.w = None
         self.loss_history = []
 
-    @staticmethod
-    def sigmoid(z):
-        z = np.clip(z, -500, 500)
+    def sigmoid(self, z):
         return 1.0 / (1.0 + np.exp(-z))
 
     def loss(self, X, y):
@@ -426,30 +545,27 @@ class LogisticRegression:
     def predict(self, X, threshold=0.5):
         return (self.predict_proba(X) >= threshold).astype(int)
 
-    def fit(self, X, y, X_val=None, y_val=None):
+    def fit(self, X, y):
         n, d = X.shape
         self.w = np.zeros(d)
         self.loss_history = []
         for epoch in range(1, self.epochs + 1):
             p = self.sigmoid(X @ self.w)
             grad = X.T @ (p - y) / n
-            grad[:-1] += self.l2 * self.w[:-1]
+            grad[:-1] += self.l2 * self.w[:-1]      # L2 gradient, bias excluded
             self.w -= self.lr * grad
 
             current_loss = self.loss(X, y)
             self.loss_history.append(current_loss)
 
-            if epoch == 1 or epoch % self.verbose_every == 0:
+            if epoch == 1 or epoch % 50 == 0:
                 train_acc = np.mean(self.predict(X) == y)
-                msg = f"Epoch {epoch:4d}/{self.epochs} | loss: {current_loss:.4f} | train acc: {train_acc:.4f}"
-                if X_val is not None:
-                    msg += f" | test acc: {np.mean(self.predict(X_val) == y_val):.4f}"
-                print(msg)
+                print(f"Epoch {epoch:4d}/{self.epochs} | loss: {current_loss:.4f} | train acc: {train_acc:.4f}")
         return self
 
 # %%
-lr_model = LogisticRegression(lr=0.05, epochs=300, l2=0.01, verbose_every=25)
-lr_model.fit(X_train, y_train, X_val=X_test, y_val=y_test)
+lr_model = LogisticRegression(lr=0.05, epochs=1000, l2=0.01)
+lr_model.fit(X_train, y_train)
 
 # %%
 plt.figure(figsize=(6, 3.5))
@@ -461,15 +577,15 @@ plt.grid(alpha=0.3)
 plt.show()
 
 # %% [markdown]
-# ### 4. Evaluation (same metric helpers as Part 2)
+# ### 4. Evaluation
 
 # %%
 lr_predictions = lr_model.predict(X_test)
 tp, fp, fn, tn = confusion_counts(lr_predictions, y_test)
 
 lr_acc = accuracy(tp, fp, fn, tn)
-lr_prec = precision(tp, fp)
-lr_rec = recall(tp, fn)
+lr_prec = precision_fun(tp, fp)
+lr_rec = recall_fun(tp, fn)
 lr_f1 = f1_score(lr_prec, lr_rec)
 
 print(f"Accuracy:  {lr_acc:.4f}")
@@ -477,8 +593,40 @@ print(f"Precision: {lr_prec:.4f}")
 print(f"Recall:    {lr_rec:.4f}")
 print(f"F1-score:  {lr_f1:.4f}")
 
+# %% [markdown]
+# # Part 4: Evaluation and Analysis
+
 # %%
 print(f"{'Model':<28}{'Accuracy':>10}{'F1':>10}")
 print("-" * 48)
+print(f"{'Bigram LM ':<28}{lm_acc:>10.4f}{lm_f1:>10.4f}")
 print(f"{'Naive Bayes':<28}{nb_acc:>10.4f}{nb_f1:>10.4f}")
 print(f"{'NB-weighted Logistic Reg.':<28}{lr_acc:>10.4f}{lr_f1:>10.4f}")
+
+# %% [markdown]
+# ## Analysis
+#
+# | Model | Input representation | Accuracy | F1 |
+# |---|---|---|---|
+# | Bigram LM | Ordered token sequence, full 42k vocabulary, previous-word context | 0.855 | 0.855 |
+# | Naive Bayes | Bag of 2,000 unigram+bigram counts, summed log-ratios | 0.815 | 0.814 |
+# | Logistic Regression | Same 2,000 features, count × log-ratio, standardized | 0.843 | 0.828 |
+#
+# The Bigram LM performed best. It sees the full vocabulary and word order, while the other two only see 2,000 features and discard order.
+#
+# Naive Bayes was lowest because unigrams and bigrams overlap, which violates its conditional-independence assumption: the same words are counted several times.
+#
+# Logistic Regression improved on Naive Bayes by about 2 points because it learns feature weights jointly instead of independently. Its training accuracy (97.5%) is far above its test accuracy (83.5%), so it overfits. We added a small L2 penalty to limit this, but it only reduces the gap.
+
+# %% [markdown]
+# # Team 
+# Amr Attia 8907
+#
+#
+# Sama Mohamed 8803
+#
+#
+# Habiba Rezq 8633
+#
+#
+# Yousef Nabil 8749
